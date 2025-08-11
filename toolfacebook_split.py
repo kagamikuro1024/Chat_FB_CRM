@@ -8,17 +8,88 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
+import socketio
+import threading
+import random
 
 
 class MessengerScraper:
-    def __init__(self, cookies_file, headless=False, pin="888888", db_file="db_tin_nhan.json"):
+    def __init__(self, cookies_file, headless=False, pin="888888", db_file="db_tin_nhan.json", user_id_chat="default", facebook_username="default", facebook_password="default"):
         self.cookies_file = cookies_file
         self.pin = pin
         self.driver = None
         self.db_file = db_file
         self.logged_chat_ids = set()
         self.chat_history_db = {}
+        self.user_id_chat = user_id_chat
+        self.facebook_username = facebook_username
+        self.facebook_password = facebook_password
         self.setup_driver(headless)
+        
+        # Khởi tạo Socket.IO client
+        self.sio = socketio.Client()
+        self.setup_socket_events()
+        
+    def setup_socket_events(self):
+        @self.sio.event
+        def connect():
+            print(f"[SOCKET] Đã kết nối với CRM Backend")
+            # Đăng ký bot với user_id_chat
+            self.sio.emit('bot_register', {'user_id_chat': self.user_id_chat})
+            
+        @self.sio.event
+        def disconnect():
+            print(f"[SOCKET] Đã ngắt kết nối với CRM Backend")
+            
+        @self.sio.event
+        def send_message_command(data):
+            print(f"[SOCKET] Nhận lệnh gửi tin nhắn: {data}")
+            # TODO: Implement gửi tin nhắn
+            pass
+            
+        @self.sio.event
+        def post_news_feed_command(data):
+            print(f"[SOCKET] Nhận lệnh đăng bài: {data}")
+            # TODO: Implement đăng bài
+            pass
+
+    def connect_to_crm(self):
+        """Kết nối tới CRM Backend"""
+        try:
+            self.sio.connect('http://localhost:5000')
+            print(f"[SOCKET] Đã kết nối thành công với CRM Backend")
+            return True
+        except Exception as e:
+            print(f"[SOCKET] Lỗi kết nối CRM Backend: {e}")
+            return False
+
+    def send_messages_to_crm(self, chat_id, messages_data):
+        """Gửi tin nhắn mới về CRM Backend"""
+        try:
+            # Chuẩn bị dữ liệu để gửi
+            messages_for_crm = []
+            for msg in messages_data.get('last_5_messages', []):
+                message_data = {
+                    'participant_name': messages_data.get('sender', 'Unknown'),
+                    'participant_url': f"https://www.facebook.com/messages/t/{chat_id}",
+                    'conversation_url': f"https://www.facebook.com/messages/t/{chat_id}",
+                    'content': msg.get('content', ''),
+                    'sender_name': msg.get('sender', 'Unknown'),
+                    'is_reply': 'replied_content' in msg,
+                    'replied_content': msg.get('replied_content', ''),
+                    'replied_to': msg.get('replied_to', '')
+                }
+                messages_for_crm.append(message_data)
+            
+            # Gửi qua Socket.IO
+            self.sio.emit('new_messages', {
+                'user_id_chat': self.user_id_chat,
+                'messages': messages_for_crm
+            })
+            print(f"[SOCKET] Đã gửi {len(messages_for_crm)} tin nhắn về CRM")
+            
+        except Exception as e:
+            print(f"[SOCKET] Lỗi khi gửi tin nhắn về CRM: {e}")
 
     def setup_driver(self, headless):
         print("[SETUP] Bắt đầu thiết lập WebDriver...")
@@ -52,6 +123,59 @@ class MessengerScraper:
         except Exception as e:
             print(f"[LỖI] Không thể lưu mã nguồn của phần tử: {e}")
 
+    def login(self):
+        """Đăng nhập Facebook bằng username và password, nhập từ từ giống người thật."""
+        print("[LOGIN] Bắt đầu đăng nhập...")
+        self.driver.get("https://www.facebook.com")
+        time.sleep(3)
+        try:
+            # Chờ trang đăng nhập tải xong
+            email_input = WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.ID, "email"))
+            )
+            password_input = self.driver.find_element(By.ID, "pass")
+            login_button = self.driver.find_element(By.NAME, "login")
+
+            # Nhập username từng ký tự với delay ngẫu nhiên
+            print("[LOGIN] Đang nhập tên đăng nhập...")
+            for char in self.facebook_username:
+                email_input.send_keys(char)
+                time.sleep(random.uniform(0.05, 0.2))
+
+            # Nhập password từng ký tự với delay ngẫu nhiên
+            print("[LOGIN] Đang nhập mật khẩu...")
+            for char in self.facebook_password:
+                password_input.send_keys(char)
+                time.sleep(random.uniform(0.05, 0.2))
+            
+            # Nhấp vào nút đăng nhập
+            print("[LOGIN] Đang click nút đăng nhập...")
+            login_button.click()
+            
+            time.sleep(10) # Chờ trang tải sau khi đăng nhập
+            
+            # Kiểm tra xem có đăng nhập thành công không
+            if "facebook.com/messages" in self.driver.current_url or "facebook.com" in self.driver.current_url:
+                print("[LOGIN] Đăng nhập thành công.")
+                # Lưu cookies mới vào file
+                self.save_cookies()
+                return True
+            else:
+                print("[LOGIN] Đăng nhập thất bại. Vui lòng kiểm tra lại tài khoản và mật khẩu.")
+                return False
+        except (NoSuchElementException, TimeoutException) as e:
+            print(f"[LOGIN] Lỗi khi tìm kiếm phần tử đăng nhập: {e}")
+            return False
+
+    def save_cookies(self):
+        """Lưu cookies hiện tại của WebDriver vào file."""
+        print("[COOKIES] Đang lưu cookies mới vào file...")
+        try:
+            with open(self.cookies_file, 'w', encoding='utf-8') as f:
+                json.dump(self.driver.get_cookies(), f, ensure_ascii=False, indent=4)
+            print(f"[COOKIES] Đã lưu cookies thành công vào {self.cookies_file}.")
+        except Exception as e:
+            print(f"[LỖI] Không thể lưu cookies: {e}")
     def load_cookies(self):
         print("[COOKIES] Đang tải cookies từ file...")
         self.driver.get("https://www.facebook.com")
@@ -59,35 +183,51 @@ class MessengerScraper:
         try:
             with open(self.cookies_file, 'r', encoding='utf-8') as f:
                 cookies = json.load(f)
+            
+            # Kiểm tra xem cookies có hợp lệ không
+            if not cookies:
+                print(f"[COOKIES] File cookies {self.cookies_file} trống.")
+                return False
+                
             for cookie in cookies:
+                # Xóa các key không hợp lệ để tránh lỗi
                 cookie_data = {
                     'name': cookie['name'],
                     'value': cookie['value'],
                     'domain': cookie.get('domain', '.facebook.com'),
+                    'path': cookie.get('path', '/'),
+                    'secure': cookie.get('secure', False),
+                    'httpOnly': cookie.get('httpOnly', False)
                 }
-                if 'path' in cookie:
-                    cookie_data['path'] = cookie['path']
-                if 'secure' in cookie:
-                    cookie_data['secure'] = cookie['secure']
-                if 'httpOnly' in cookie:
-                    cookie_data['httpOnly'] = cookie['httpOnly']
+                # Selenium chỉ chấp nhận expires là số
+                if 'expiry' in cookie:
+                    cookie_data['expiry'] = cookie['expiry']
+                
                 try:
                     self.driver.add_cookie(cookie_data)
-                    print(f"[COOKIES] Đã thêm cookie: {cookie['name']}")
                 except Exception as e:
+                    # Bỏ qua các cookie có vấn đề
                     print(f"[COOKIES] Lỗi khi thêm cookie {cookie['name']}: {e}")
                     continue
+            
+            self.driver.refresh()
+            print("[COOKIES] Đã làm mới trang để áp dụng cookies.")
+            time.sleep(5)
+            
+            # Kiểm tra lại xem đăng nhập thành công bằng cookies chưa
+            if "login.php" in self.driver.current_url:
+                print("[COOKIES] Cookies đã hết hạn hoặc không hợp lệ.")
+                return False
+            
+            print("[COOKIES] Tải cookies thành công.")
+            return True
+            
         except FileNotFoundError:
-            print(f"[LỖI] Không tìm thấy file cookies: {self.cookies_file}. Vui lòng kiểm tra lại đường dẫn.")
+            print(f"[LỖI] Không tìm thấy file cookies: {self.cookies_file}. Sẽ tiến hành đăng nhập.")
             return False
         except Exception as e:
-            print(f"[LỖI] Lỗi khi tải cookies: {e}")
+            print(f"[LỖI] Lỗi khi tải cookies: {e}. Sẽ tiến hành đăng nhập.")
             return False
-        
-        self.driver.refresh()
-        print("[COOKIES] Đã làm mới trang để áp dụng cookies.")
-        time.sleep(5)
-        return True
 
     def load_db(self):
         try:
@@ -267,6 +407,10 @@ class MessengerScraper:
                 }
                 self.logged_chat_ids.add(chat_id)
                 self.save_data_to_file()
+                
+                # Gửi tin nhắn về CRM Backend
+                self.send_messages_to_crm(chat_id, self.chat_history_db[chat_id])
+                
                 newly_scraped_count += 1
                 
                 print(f"[SCRAPER] Đã lấy và lưu 5 tin nhắn gần nhất cho ID: {chat_id}. Đánh dấu đã đọc.")
@@ -719,28 +863,131 @@ class MessengerScraper:
     def monitor_new_messages(self, interval=30):
         print("[MONITOR] Bắt đầu cào các tin nhắn chưa đọc hiện có...")
         
+        # Kết nối tới CRM Backend
+        if not self.connect_to_crm():
+            print("[MONITOR] Không thể kết nối CRM Backend. Tiếp tục chạy offline.")
+        
         if self.go_to_messenger_unread():
             self.scrape_unread_messages()
         else:
              print("[MONITOR] Không thể truy cập tab 'Chưa đọc'. Dừng cào tin nhắn ban đầu.")
 
         print(f"[MONITOR] Bắt đầu giám sát tin nhắn mới mỗi {interval} giây. Nhấn Ctrl+C để dừng.")
+        
+        # Lưu trạng thái cuộc trò chuyện để so sánh
+        previous_conversations = set()
+        conversation_timestamps = {}
+        
         try:
             while True:
                 time.sleep(interval)
                 print(f"\n[MONITOR] Đang quét tin nhắn mới...")
-                self.driver.get("https://www.facebook.com/messages")
-                time.sleep(5)
                 
-                if self.go_to_messenger_unread():
-                    newly_scraped_count = self.scrape_unread_messages()
-                    if newly_scraped_count == 0:
-                        print("[MONITOR] Không có tin nhắn mới.")
+                # Lấy danh sách cuộc trò chuyện hiện tại
+                current_conversations = self.get_current_conversations()
+                
+                # So sánh với trạng thái trước
+                new_conversations = current_conversations - previous_conversations
+                updated_conversations = self.detect_updated_conversations(conversation_timestamps)
+                
+                if new_conversations or updated_conversations:
+                    print(f"[MONITOR] Phát hiện {len(new_conversations)} cuộc trò chuyện mới và {len(updated_conversations)} cuộc trò chuyện cập nhật")
+                    
+                    # Cào tin nhắn mới
+                    self.driver.get("https://www.facebook.com/messages")
+                    time.sleep(5)
+                    
+                    if self.go_to_messenger_unread():
+                        newly_scraped_count = self.scrape_unread_messages()
+                        if newly_scraped_count > 0:
+                            print(f"[MONITOR] Đã cào {newly_scraped_count} cuộc trò chuyện mới")
+                        else:
+                            print("[MONITOR] Không có tin nhắn mới cần cào")
+                    else:
+                        print("[MONITOR] Không thể truy cập tab 'Chưa đọc'")
+                    
+                    # Cập nhật trạng thái
+                    previous_conversations = current_conversations
+                    conversation_timestamps = self.get_conversation_timestamps()
                 else:
-                    print("[MONITOR] Không thể truy cập tab 'Chưa đọc'. Tiếp tục giám sát.")
+                    print("[MONITOR] Không có thay đổi trong cuộc trò chuyện")
                 
         except KeyboardInterrupt:
             print("\n[MONITOR] Đã dừng chương trình.")
+
+    def get_current_conversations(self):
+        """Lấy danh sách ID cuộc trò chuyện hiện tại"""
+        conversations = set()
+        try:
+            self.driver.get("https://www.facebook.com/messages")
+            time.sleep(3)
+            
+            if not self.go_to_messenger_unread():
+                return conversations
+            
+            conversation_elements = self.driver.find_elements(By.XPATH, "//div[@role='grid']//div[@role='row']")
+            
+            for conv in conversation_elements:
+                try:
+                    conv_link = conv.find_element(By.TAG_NAME, "a")
+                    href = conv_link.get_attribute('href')
+                    
+                    chat_id_match = re.search(r't/(\d+)', href)
+                    if chat_id_match:
+                        chat_id = chat_id_match.group(1)
+                        conversations.add(chat_id)
+                except Exception as e:
+                    continue
+                    
+        except Exception as e:
+            print(f"[MONITOR] Lỗi khi lấy danh sách cuộc trò chuyện: {e}")
+        
+        return conversations
+
+    def get_conversation_timestamps(self):
+        """Lấy timestamp của các cuộc trò chuyện"""
+        timestamps = {}
+        try:
+            conversation_elements = self.driver.find_elements(By.XPATH, "//div[@role='grid']//div[@role='row']")
+            
+            for conv in conversation_elements:
+                try:
+                    conv_link = conv.find_element(By.TAG_NAME, "a")
+                    href = conv_link.get_attribute('href')
+                    
+                    chat_id_match = re.search(r't/(\d+)', href)
+                    if chat_id_match:
+                        chat_id = chat_id_match.group(1)
+                        
+                        # Lấy timestamp từ abbr element
+                        try:
+                            time_abbr = conv.find_element(By.XPATH, ".//abbr")
+                            timestamp = time_abbr.get_attribute('aria-label')
+                            timestamps[chat_id] = timestamp
+                        except NoSuchElementException:
+                            timestamps[chat_id] = "unknown"
+                            
+                except Exception as e:
+                    continue
+                    
+        except Exception as e:
+            print(f"[MONITOR] Lỗi khi lấy timestamp: {e}")
+        
+        return timestamps
+
+    def detect_updated_conversations(self, previous_timestamps):
+        """Phát hiện cuộc trò chuyện có tin nhắn mới"""
+        updated = set()
+        current_timestamps = self.get_conversation_timestamps()
+        
+        for chat_id, current_time in current_timestamps.items():
+            if chat_id in previous_timestamps:
+                previous_time = previous_timestamps[chat_id]
+                if current_time != previous_time:
+                    updated.add(chat_id)
+                    print(f"[MONITOR] Cuộc trò chuyện {chat_id} có tin nhắn mới: {previous_time} -> {current_time}")
+        
+        return updated
 
     def close(self):
         print("[CLOSE] Đang đóng WebDriver...")
@@ -749,14 +996,37 @@ class MessengerScraper:
         print("[CLOSE] WebDriver đã đóng.")
 
 def main():
+    import sys
     COOKIES_FILE = "fb_cookies.json"
     PIN = "888888"
     DATABASE_FILE = "db_tin_nhan.json"
-    scraper = MessengerScraper(cookies_file=COOKIES_FILE, pin=PIN, headless=False, db_file=DATABASE_FILE)
+    
+    # Lấy user_id_chat từ command line argument
+    user_id_chat = sys.argv[1] if len(sys.argv) > 1 else "default"
+    facebook_username = "0386122204"
+    facebook_password = "Trung5kvshth@"
+
+    
+    scraper = MessengerScraper(
+        cookies_file=COOKIES_FILE, 
+        pin=PIN, 
+        headless=False, 
+        db_file=DATABASE_FILE,
+        user_id_chat=user_id_chat,
+        facebook_username=facebook_username,
+        facebook_password=facebook_password,
+    )
     try:
-        if scraper.load_cookies():
-            scraper.load_db()
-            scraper.monitor_new_messages(interval=30)
+        # Thử tải cookies
+        if not scraper.load_cookies():
+            # Nếu không thành công, thử đăng nhập bằng tài khoản/mật khẩu
+            if not scraper.login():
+                print("[CHƯƠNG TRÌNH] Đăng nhập thất bại. Dừng chương trình.")
+                return
+            
+        # Nếu đã có cookies hoặc đăng nhập thành công, tiếp tục chạy
+        scraper.load_db()
+        scraper.monitor_new_messages(interval=30)
     finally:
         scraper.close()
 

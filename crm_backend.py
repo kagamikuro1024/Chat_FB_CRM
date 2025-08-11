@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-here'
 CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 # Khởi tạo database
 def init_database():
@@ -425,6 +425,10 @@ def new_messages(data):
         participant_url = message_data.get('participant_url')
         conversation_url = message_data.get('conversation_url')
         content = message_data.get('content')
+        sender_name = message_data.get('sender_name', participant_name)
+        is_reply = message_data.get('is_reply', False)
+        replied_content = message_data.get('replied_content', '')
+        replied_to = message_data.get('replied_to', '')
         
         # Tìm hoặc tạo conversation
         cursor.execute('''
@@ -441,7 +445,16 @@ def new_messages(data):
             cursor.execute('''
                 SELECT id FROM facebook_accounts WHERE user_id_chat = ?
             ''', (user_id_chat,))
-            account_id = cursor.fetchone()[0]
+            account_result = cursor.fetchone()
+            if account_result:
+                account_id = account_result[0]
+            else:
+                # Tạo tài khoản mới nếu chưa có
+                cursor.execute('''
+                    INSERT INTO facebook_accounts (user_id_chat, username, encrypted_password)
+                    VALUES (?, ?, ?)
+                ''', (user_id_chat, f"Account_{user_id_chat}", "dummy_password"))
+                account_id = cursor.lastrowid
             
             cursor.execute('''
                 INSERT INTO conversations (facebook_account_id, participant_name, participant_url, conversation_url)
@@ -453,7 +466,7 @@ def new_messages(data):
         cursor.execute('''
             INSERT INTO messages (conversation_id, sender_name, content, is_from_crm)
             VALUES (?, ?, ?, 0)
-        ''', (conversation_id, participant_name, content))
+        ''', (conversation_id, sender_name, content))
         
         # Cập nhật unread_count và last_message_timestamp
         cursor.execute('''
@@ -530,6 +543,13 @@ def post_status_update(data):
         'status': status,
         'error_message': error_message
     }, broadcast=True)
+
+@socketio.event
+def ping(data):
+    """Xử lý ping để giữ kết nối"""
+    user_id_chat = data.get('user_id_chat', 'unknown')
+    print(f"[SOCKET] Ping từ {user_id_chat}")
+    emit('pong', {'user_id_chat': user_id_chat})
 
 if __name__ == '__main__':
     init_database()
